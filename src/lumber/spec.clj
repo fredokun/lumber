@@ -8,8 +8,9 @@
 (do-for-example
  (def *bin-trees*
    {::bin-tree #{::leaf ::node}
-    ::leaf [:leaf 1]
-    ::node [:node 1 ::bin-tree ::bin-tree]}))
+    ::leaf [:lit 1 :leaf]
+    ::node [:seq 1 [:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]]
+    :init ::bin-tree}))
 
 (defn rule-branch? [b]
   (set? b))
@@ -20,113 +21,101 @@
 (example
  (rule-branch? [:leaf 1]) => false)
 
+(defn rule-cons-kind? [t]
+  (contains? #{:lit :seq} t))
+
 (defn rule-cons? [b]
   (and (vector? b)
-       (>= (count b) 2)))
+       (rule-cons-kind? (first b))
+       (>= (count b) 3)))
 
 (example
  (rule-cons? #{::leaf ::node}) => false)
 
 (example
- (rule-cons? [:leaf 1]) => true)
+ (rule-cons? [:lit 1 :leaf]) => true)
 
 (example
- (rule-cons? [:node 1 ::bin-tree ::bin-tree]) => true)
+ (rule-cons? [:seq 1 [:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]]) => true)
 
-(defn rule-cons-info [rule]
-  (first rule))
-
-(example
- (rule-cons-info [:leaf 1]) => :leaf)
+(defn rule-cons-literal [rule]
+  (nth rule 2))
 
 (example
- (rule-cons-info [:node 1 ::bin-tree ::bin-tree]) => :node)
-
-(defn rule-cons-weight [rule]
-  (second rule))
-
-(example
- (rule-cons-weight [:leaf 1]) => 1)
-
-(example
- (rule-cons-weight [:node 1 ::bin-tree ::bin-tree]) => 1)
+ (rule-cons-literal [:lit 1 :leaf]) => :leaf)
 
 (defn rule-cons-children [rule]
   (rest (rest rule)))
 
 (example
- (rule-cons-children [:leaf 1]) => '())
-
-(example
- (rule-cons-children [:node 1 ::bin-tree ::bin-tree])
- => [::bin-tree ::bin-tree])
-
-(defn rule-component-ref? [c]
-  (keyword? c))
-
-(defn rule-component-seq? [c]
-  (and (vector? c)
-       (= (count c) 2)
-       (= (first c) :seq)
-       (keyword? (second c))))
+ (rule-cons-children [:seq 1 [:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]])
+ => [[:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]])
 
 (defn rule-cons-arity [rule]
   (loop [children (rule-cons-children rule), count 0, arbitrary false]
     (if (seq children)
-      (cond
-        (rule-component-ref? (first children))
-        (recur (rest children) (inc count) arbitrary)
-        (rule-component-seq? (first children))
-        (recur (rest children) count true)
-        :else (throw (ex-info "Bad rule component" {:component (first children) :rule rule})))
+      (let [[kind val] (first children)]
+        (case kind
+          (:lit :ref)
+          (recur (rest children) (inc count) arbitrary)
+          :seq
+          (recur (rest children) count true)
+          (throw (ex-info "Bad rule component, unknown kind" {:kind kind :component (first children) :rule rule}))))
       (if arbitrary
         [:min count]
         [:exact count]))))
 
 (example
- (rule-cons-arity [:leaf 1]) => [:exact 0])
+ (rule-cons-arity [:seq 1 [:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]])
+ => [:exact 3])
 
 (example
- (rule-cons-arity [:node 1 ::bin-tree ::bin-tree]) => [:exact 2])
-
-(example
- (rule-cons-arity [:node 1 ::bin-tree [:seq ::bin-tree] ::bin-tree])
+ (rule-cons-arity [:seq 1 [:lit :node] [:seq ::bin-tree] [:ref ::bin-tree]])
  => [:min 2])
 
-(defn recognizer [spec cont]
-  (if (seq cont)
-    (let [[rulename data] (first cont)
-          rule (get spec rulename)]
-      ())))
+(defn mkrule [r]
+  (cond
+    (rule-branch? r) {:kind :branch :rule r}
+    (rule-cons? r) {:kind :cons :rule r}
+    :else (throw (ex-info "Bad rule" {:rule r}))))
 
-(declare rec-leaf)
-(declare rec-node)
-(defn rec-bin-tree [t]
-  (let [[ok? ret] (rec-leaf t)]
-    (if ok?
-      [true ret]
-      (let [[ok? ret] (rec-node t)]
-        (if ok?
-          [true ret]
-          [false {:input t :fails ::bin-tree}])))))
+(defn recognizer [spec data]
+  (loop [cont [(mkrule (get spec (:init spec)))
+               data]]
+    (if (seq cont)
+      (let [[{kind :kind
+              rule :rule
+              alt :alt :or {alt '()}} data] (first cont)]
+        (case kind
+          :branch (recur (conj cont [{:kind :cons
+                                      :rule (mkrule (first rule))
+                                      :alt (rest rule)}
+                                     data]))
+          :cons (let [[ckind weight & children] rule]
+                  (case ckind
+                    :lit (cond
+                           ;; literal check
+                           (= (first children) data)
+                           (recur (rest cont))
+                           ;; literal is wrong, try alt if any
+                           (seq alt)
+                           (recur (conj cont [{:kind :cons
+                                               :rule (mkrule (first alt))
+                                               :alt (rest alt)}] data))
+                           :else ;; no more alternative
+                           [:ko {:msg "Missing literal" :literal (first children) :data data :rule rule}])
+                    :seq (if-not (sequential? data)
+                           (if (seq alt)
+                             (recur (conj cont [{:kind :cons
+                                                 :rule (mkrule (first alt))
+                                                 :alt (rest alt)} data]))
+                             [:ko {:msg "Not a sequence" :data data :rule rule}])
+                           ;; sequential data
+                           (recur (conj cont [{:kind :seq
+                                               :rule children
+                                               :alt alt} data])))))
+          :seq )))))
 
-(defn rec-leaf [t]
-  (if (= t :leaf)
-    [true t]
-    [false {:input t :fails ::leaf}]))
-
-(defn rec-node [t]
-  (if (not (sequential? t))
-    [false {:input t :fails ::node :reason "not sequential"}]
-    (if (not= (count t) 3)
-      [false {:input t :fails ::node :reason "wrong arity"
-              :expected-arity 3 :given-arity (count t)}]
-      (let [[info sub1 sub2] t]
-        (if (not= info :node)
-          [false {:input t :fails ::node :reason "wrong content"
-                  :expected-contents :node
-                  :given-contents info}]
-          )))))
 
 (do-for-example
  (def *nary-trees*
