@@ -1,5 +1,5 @@
 
-(ns lumber.spec
+(ns lumber.topdown
   (:require [clojure.spec :as s]
             [clj-by.example :refer [example do-for-example]]))
 
@@ -37,41 +37,6 @@
 
 (example
  (rule-cons? [:seq 1 [:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]]) => true)
-
-(defn rule-cons-literal [rule]
-  (nth rule 2))
-
-(example
- (rule-cons-literal [:lit 1 :leaf]) => :leaf)
-
-(defn rule-cons-children [rule]
-  (rest (rest rule)))
-
-(example
- (rule-cons-children [:seq 1 [:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]])
- => [[:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]])
-
-(defn rule-cons-arity [rule]
-  (loop [children (rule-cons-children rule), count 0, arbitrary false]
-    (if (seq children)
-      (let [[kind val] (first children)]
-        (case kind
-          (:lit :ref)
-          (recur (rest children) (inc count) arbitrary)
-          :seq
-          (recur (rest children) count true)
-          (throw (ex-info "Bad rule component, unknown kind" {:kind kind :component (first children) :rule rule}))))
-      (if arbitrary
-        [:min count]
-        [:exact count]))))
-
-(example
- (rule-cons-arity [:seq 1 [:lit :node] [:ref ::bin-tree] [:ref ::bin-tree]])
- => [:exact 3])
-
-(example
- (rule-cons-arity [:seq 1 [:lit :node] [:seq ::bin-tree] [:ref ::bin-tree]])
- => [:min 2])
 
 (defn safe-get
   [m k]
